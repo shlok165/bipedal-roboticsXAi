@@ -1,0 +1,100 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <!-- Gazebo ros2_control plugin -->
+    <gazebo>
+        <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+            <parameters>/home/sv/ros/bipedal/src/robot_bringup/config/controllers.yaml</parameters>
+            <ros>
+                <remapping>/controller_manager/robot_description:=/robot_description</remapping>
+            </ros>
+        </plugin>
+    </gazebo>
+
+    <!-- Ground plane contact properties -->
+    <gazebo reference="base_footprint">
+        <turnGravityOff>false</turnGravityOff>
+        <material>Gazebo/Grey</material>
+    </gazebo>
+
+    <!-- Base link properties -->
+    <gazebo reference="base_link">
+        <material>Gazebo/Grey</material>
+    </gazebo>
+
+    <!-- Torso properties -->
+    <gazebo reference="torso">
+        <material>Gazebo/Grey</material>
+        <turnGravityOff>false</turnGravityOff>
+    </gazebo>
+
+    <!-- Left leg properties -->
+    <gazebo reference="left_thigh">
+        <material>Gazebo/Blue</material>
+        <turnGravityOff>false</turnGravityOff>
+    </gazebo>
+
+    <gazebo reference="left_shin">
+        <material>Gazebo/Grey</material>
+        <turnGravityOff>false</turnGravityOff>
+    </gazebo>
+
+    <gazebo reference="left_foot">
+        <material>Gazebo/Blue</material>
+        <turnGravityOff>false</turnGravityOff>
+        <mu1>1.0</mu1>
+        <mu2>1.0</mu2>
+        <kp>10000000.0</kp>
+        <kd>1.0</kd>
+        <minDepth>0.001</minDepth>
+        <maxVel>0.0</maxVel>
+    </gazebo>
+
+    <!-- Right leg properties -->
+    <gazebo reference="right_thigh">
+        <material>Gazebo/Blue</material>
+        <turnGravityOff>false</turnGravityOff>
+    </gazebo>
+
+    <gazebo reference="right_shin">
+        <material>Gazebo/Grey</material>
+        <turnGravityOff>false</turnGravityOff>
+    </gazebo>
+
+    <gazebo reference="right_foot">
+        <material>Gazebo/Blue</material>
+        <turnGravityOff>false</turnGravityOff>
+        <mu1>1.0</mu1>
+        <mu2>1.0</mu2>
+        <kp>10000000.0</kp>
+        <kd>1.0</kd>
+        <minDepth>0.001</minDepth>
+        <maxVel>0.0</maxVel>
+    </gazebo>
+
+    <!-- Joint properties for better simulation -->
+    <gazebo reference="left_hip_joint">
+        <implicitSpringDamper>true</implicitSpringDamper>
+        <springStiffness>0</springStiffness>
+        <springReference>0</springReference>
+    </gazebo>
+
+    <gazebo reference="left_knee_joint">
+        <implicitSpringDamper>true</implicitSpringDamper>
+        <springStiffness>0</springStiffness>
+        <springReference>0</springReference>
+    </gazebo>
+
+    <gazebo reference="right_hip_joint">
+        <implicitSpringDamper>true</implicitSpringDamper>
+        <springStiffness>0</springStiffness>
+        <springReference>0</springReference>
+    </gazebo>
+
+    <gazebo reference="right_knee_joint">
+        <implicitSpringDamper>true</implicitSpringDamper>
+        <springStiffness>0</springStiffness>
+        <springReference>0</springReference>
+    </gazebo>
+
+</robot>

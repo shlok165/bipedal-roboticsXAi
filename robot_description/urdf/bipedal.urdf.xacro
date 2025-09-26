@@ -5,7 +5,8 @@
     <xacro:include filename="parts/torso.xacro" />
     <xacro:include filename="parts/leg.xacro" />
     <xacro:include filename="bipedal.ros2_control.xacro" />
-
+    <xacro:include filename="bipedal.gazebo.xacro" />
+    
     <link name="base_footprint"/>
 
     <joint name="base_link_joint" type="fixed">
