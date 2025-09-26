@@ -1,0 +1,39 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 100  
+
+    bipedal_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+
+bipedal_controller:
+  ros__parameters:
+    joints:
+      - left_hip_joint
+      - left_knee_joint
+      - right_hip_joint
+      - right_knee_joint
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    constraints:
+      goal_time: 0.5  
+      left_hip_joint:
+        goal: 0.05 
+      left_knee_joint:
+        goal: 0.05 
+      right_hip_joint:
+        goal: 0.05 
+      right_knee_joint:
+        goal: 0.05
+
+    gains:
+      left_hip_joint:   {p: 10.0, i: 0.0, d: 1.0}
+      left_knee_joint:  {p: 10.0, i: 0.0, d: 1.0}
+      right_hip_joint:  {p: 10.0, i: 0.0, d: 1.0}
+      right_knee_joint: {p: 10.0, i: 0.0, d: 1.0}

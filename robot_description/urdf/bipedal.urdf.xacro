@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="bipedal">
+
+    <xacro:include filename="materials.xacro" />
+    <xacro:include filename="parts/torso.xacro" />
+    <xacro:include filename="parts/leg.xacro" />
+    <xacro:include filename="bipedal.ros2_control.xacro" />
+
+    <link name="base_footprint"/>
+
+    <joint name="base_link_joint" type="fixed">
+        <parent link="base_footprint"/>
+        <child link="base_link"/>
+        <origin xyz="0 0 0.5" rpy="0 0 0"/>
+    </joint>
+    
+    <link name="base_link"/>
+
+    <xacro:torso parent="base_link" />
+
+    <xacro:leg prefix="left" parent="torso">
+        <origin xyz="0 0.1 -0.25" rpy="0 0 0"/>
+    </xacro:leg>
+
+    <xacro:leg prefix="right" parent="torso">
+        <origin xyz="0 -0.1 -0.25" rpy="0 0 0"/>
+    </xacro:leg>
+
+
+</robot>

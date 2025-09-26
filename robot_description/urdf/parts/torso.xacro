@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <xacro:macro name="torso" params="parent">
+        <joint name="torso_joint" type="fixed">
+            <parent link="${parent}"/>
+            <child link="torso"/>
+            <origin xyz="0 0 0.5" rpy="0 0 0"/>
+        </joint>
+
+        <link name="torso">
+            <visual>
+                <geometry>
+                    <box size="0.25 0.2 0.5"/>
+                </geometry>
+                <material name="grey"/>
+            </visual>
+            <collision>
+                <geometry>
+                    <box size="0.25 0.2 0.5"/>
+                </geometry>
+            </collision>
+            <inertial>
+                <mass value="5"/>
+                <inertia ixx="0.1" ixy="0.0" ixz="0.0" iyy="0.1" iyz="0.0" izz="0.1"/>
+            </inertial>
+        </link>
+    </xacro:macro>
+
+</robot>
