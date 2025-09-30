@@ -20,6 +20,14 @@
             <state_interface name="effort"/>
         </joint>
 
+        <!-- ADDED: left_ankle_joint definition -->
+        <joint name="left_ankle_joint">
+            <command_interface name="position"/>
+            <state_interface name="position"/>
+            <state_interface name="velocity"/>
+            <state_interface name="effort"/>
+        </joint>
+
         <joint name="right_hip_joint">
             <command_interface name="position"/>
             <state_interface name="position"/>
@@ -28,6 +36,14 @@
         </joint>
         
         <joint name="right_knee_joint">
+            <command_interface name="position"/>
+            <state_interface name="position"/>
+            <state_interface name="velocity"/>
+            <state_interface name="effort"/>
+        </joint>
+
+        <!-- ADDED: right_ankle_joint definition -->
+        <joint name="right_ankle_joint">
             <command_interface name="position"/>
             <state_interface name="position"/>
             <state_interface name="velocity"/>

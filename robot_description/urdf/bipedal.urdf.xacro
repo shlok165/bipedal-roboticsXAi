@@ -20,12 +20,13 @@
     <xacro:torso parent="base_link" />
 
     <xacro:leg prefix="left" parent="torso">
-        <origin xyz="0 0.1 -0.25" rpy="0 0 0"/>
+        <origin xyz="-0.05 0.1 -0.125" rpy="0 0 0"/>
     </xacro:leg>
 
     <xacro:leg prefix="right" parent="torso">
-        <origin xyz="0 -0.1 -0.25" rpy="0 0 0"/>
+        <origin xyz="-0.05 -0.1 -0.125" rpy="0 0 0"/>
     </xacro:leg>
 
 
 </robot>
+

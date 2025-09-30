@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Imu
+from sensor_msgs.msg import Imu, JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
 
@@ -10,6 +10,7 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback
 import math
 import time
 import threading
@@ -23,7 +24,11 @@ import os
 
 class BipedalRLEnv(gym.Env, Node):
     """
-    Enhanced Bipedal RL Environment with fall detection and auto-restart
+    Improved Bipedal Walking RL Environment
+    - Better observation space with joint states
+    - Reward for forward movement
+    - Smooth action control
+    - Proper fall detection
     """
     
     def __init__(self):
@@ -32,43 +37,65 @@ class BipedalRLEnv(gym.Env, Node):
         
         # ROS2 Setup
         self.imu_sub = self.create_subscription(Imu, '/bipedal/imu_remapped', self.imu_callback, 10)
+        self.joint_sub = self.create_subscription(JointState, '/joint_states', self.joint_callback, 10)
         self.joint_pub = self.create_publisher(JointTrajectory, '/bipedal_controller/joint_trajectory', 10)
         
         # State variables
         self.current_orientation = np.array([0.0, 0.0, 0.0, 1.0])
         self.current_angular_vel = np.array([0.0, 0.0, 0.0])
-        self.current_linear_accel = np.array([0.0, 0.0, 9.81])  # Initial gravity
+        self.current_linear_accel = np.array([0.0, 0.0, 9.81])
+        
+        # Joint states (6 joints)
+        self.joint_names = ['left_hip_joint', 'left_knee_joint', 'left_ankle_joint',
+                           'right_hip_joint', 'right_knee_joint', 'right_ankle_joint']
+        self.current_joint_positions = np.zeros(6)
+        self.current_joint_velocities = np.zeros(6)
+        self.last_joint_positions = np.zeros(6)
+        
+        # Data synchronization
         self.data_lock = Lock()
-        self.data_received = False
+        self.imu_received = False
+        self.joint_received = False
         
-        # Fall detection parameters
-        self.robot_standing_height = 0.8  # Assume ~80cm when standing normally
-        self.current_estimated_height = self.robot_standing_height
-        self.fall_threshold = 0.5  # 50cm - robot definitely fallen
-        self.warning_threshold = 0.65  # 65cm - robot falling significantly
-        self.velocity_z = 0.0  # Vertical velocity for height estimation
-        self.last_time = time.time()
+        # Position tracking for forward movement reward
+        self.initial_x_position = 0.0
+        self.current_x_position = 0.0
+        self.last_x_position = 0.0
+        self.x_velocity = 0.0
         
-        # Fall detection state
+        # Fall detection
         self.is_fallen = False
-        self.fall_warning = False
+        self.fall_angle_threshold = 0.8  # ~45 degrees
         
-        # RL Environment Setup - enhanced observation space
+        # Enhanced observation space:
+        # [pitch, roll, pitch_rate, roll_rate, 
+        #  6 joint positions, 6 joint velocities,
+        #  x_velocity, phase]
+        obs_dim = 4 + 6 + 6 + 2  # 18 total
         self.observation_space = spaces.Box(
-            low=np.array([-3.14, -3.14, -10.0, -10.0, 0.0, -1.0]), 
-            high=np.array([3.14, 3.14, 10.0, 10.0, 2.0, 1.0]), 
-            dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
         
+        # Action space: delta changes to joint positions (smoother control)
         self.action_space = spaces.Box(
-            low=np.array([-1.5, -0.1, -1.5, -0.1]), 
-            high=np.array([1.5, 2.0, 1.5, 2.0]), 
-            dtype=np.float32
+            low=-0.2, high=0.2, shape=(6,), dtype=np.float32
         )
+        
+        # Target joint positions (will be modified by actions)
+        self.target_joint_positions = np.zeros(6)
         
         # Episode management
         self.episode_steps = 0
-        self.max_episode_steps = 500
+        self.max_episode_steps = 1000  # Longer episodes for learning walking
+        self.episode_number = 0
+        self.episode_start_time = time.time()
+        
+        # Walking phase (for cyclical reward)
+        self.walking_phase = 0.0
+        
+        # Curriculum learning parameters
+        self.curriculum_stage = 0
+        self.success_count = 0
         
         # Keyboard input handling
         self.key_pressed = False
@@ -79,25 +106,38 @@ class BipedalRLEnv(gym.Env, Node):
         # Create restart script
         self.create_restart_script()
         
-        self.get_logger().info('Enhanced BipedalRLEnv initialized with fall detection!')
+        self.get_logger().info('Improved BipedalRLEnv initialized!')
     
     def create_restart_script(self):
         """Create the restart script for ROS system"""
         script_content = '''#!/bin/bash
+
+ros2 topic pub /bipedal_controller/joint_trajectory trajectory_msgs/msg/JointTrajectory "
+{       
+  joint_names: ['left_hip_joint', 'left_knee_joint', 'left_ankle_joint', 'right_hip_joint', 'right_knee_joint', 'right_ankle_joint'],
+  points: [
+    {
+      positions: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+      time_from_start: {sec: 0, nanosec: 0}
+    }
+  ]
+}" --once
+
+sleep 2
 
 gz service -s /world/bipedal_world/set_pose --reqtype gz.msgs.Pose --reptype gz.msgs.Boolean --req '
 name: "bipedal"
 position: {x: 0.0, y: 0.0, z: 0.8}
 orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
 '
-sleep 5
+sleep 2
 '''
         
         script_path = os.path.expanduser('~/restart_robot.sh')
         try:
             with open(script_path, 'w') as f:
                 f.write(script_content)
-            os.chmod(script_path, 0o755)  # Make executable
+            os.chmod(script_path, 0o755)
             self.restart_script_path = script_path
             self.get_logger().info(f'Restart script created at: {script_path}')
         except Exception as e:
@@ -118,8 +158,6 @@ sleep 5
                 time.sleep(0.1)
     
     def imu_callback(self, msg):
-        current_time = time.time()
-        
         with self.data_lock:
             self.current_orientation = np.array([
                 msg.orientation.x, msg.orientation.y, 
@@ -131,57 +169,27 @@ sleep 5
             self.current_linear_accel = np.array([
                 msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z
             ])
-            
-            # Update height estimation
-            if self.data_received:  # Not first callback
-                dt = current_time - self.last_time
-                if dt > 0 and dt < 0.5:  # Reasonable time step
-                    self.update_height_estimation(dt)
-            
-            self.last_time = current_time
-            self.data_received = True
+            self.imu_received = True
     
-    def update_height_estimation(self, dt):
-        """Estimate robot height using IMU data"""
-        try:
-            # Get world-frame acceleration (remove gravity)
-            roll, pitch = self.quaternion_to_euler(*self.current_orientation)
-            
-            # Transform acceleration to world frame (simplified)
-            # Remove gravity component assuming robot is roughly upright
-            accel_world_z = self.current_linear_accel[2] * math.cos(pitch) * math.cos(roll) - 9.81
-            
-            # Update velocity and height using integration
-            self.velocity_z += accel_world_z * dt
-            height_change = self.velocity_z * dt + 0.5 * accel_world_z * dt * dt
-            self.current_estimated_height += height_change
-            
-            # Apply some damping to prevent drift
-            self.velocity_z *= 0.98
-            
-            # Clamp height to reasonable bounds
-            self.current_estimated_height = max(0.1, min(1.2, self.current_estimated_height))
-            
-            # Check for fall conditions
-            if self.current_estimated_height <= self.fall_threshold:
-                if not self.is_fallen:
-                    self.is_fallen = True
-                    self.get_logger().warn(f'ROBOT FALLEN! Height: {self.current_estimated_height:.3f}m')
-            elif self.current_estimated_height <= self.warning_threshold:
-                if not self.fall_warning:
-                    self.fall_warning = True
-                    self.get_logger().warn(f'Fall warning! Height: {self.current_estimated_height:.3f}m')
-            else:
-                # Reset warnings if robot recovers
-                if self.fall_warning and self.current_estimated_height > self.warning_threshold + 0.05:
-                    self.fall_warning = False
-                    self.get_logger().info('Robot recovered from fall warning')
-                    
-        except Exception as e:
-            self.get_logger().error(f'Height estimation error: {e}')
+    def joint_callback(self, msg):
+        """Callback for joint states"""
+        with self.data_lock:
+            try:
+                # Map joint names to our order
+                joint_dict = {name: (pos, vel) for name, pos, vel in 
+                            zip(msg.name, msg.position, msg.velocity)}
+                
+                for i, joint_name in enumerate(self.joint_names):
+                    if joint_name in joint_dict:
+                        self.current_joint_positions[i] = joint_dict[joint_name][0]
+                        self.current_joint_velocities[i] = joint_dict[joint_name][1]
+                
+                self.joint_received = True
+            except Exception as e:
+                self.get_logger().error(f'Joint callback error: {e}')
     
     def quaternion_to_euler(self, x, y, z, w):
-        """Convert quaternion to roll, pitch"""
+        """Convert quaternion to roll, pitch, yaw"""
         sinr_cosp = 2 * (w * x + y * z)
         cosr_cosp = 1 - 2 * (x * x + y * y)
         roll = math.atan2(sinr_cosp, cosr_cosp)
@@ -192,72 +200,119 @@ sleep 5
         else:
             pitch = math.asin(sinp)
         
-        return roll, pitch
+        siny_cosp = 2 * (w * z + x * y)
+        cosy_cosp = 1 - 2 * (y * y + z * z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+        
+        return roll, pitch, yaw
+    
+    def estimate_x_position(self):
+        """Estimate x position from IMU acceleration"""
+        # Simple integration of x-acceleration
+        # This is rough but better than nothing without odometry
+        dt = 0.1
+        ax = self.current_linear_accel[0]
+        
+        # Simple velocity estimation
+        self.x_velocity = self.x_velocity * 0.95 + ax * dt  # With damping
+        self.current_x_position += self.x_velocity * dt
     
     def get_observation(self):
-        """Get current state including height information"""
+        """Get current state observation"""
         with self.data_lock:
-            if not self.data_received:
-                return np.array([0.0, 0.0, 0.0, 0.0, 0.8, 0.0], dtype=np.float32)
+            if not (self.imu_received and self.joint_received):
+                return np.zeros(18, dtype=np.float32)
             
-            roll, pitch = self.quaternion_to_euler(*self.current_orientation)
+            roll, pitch, yaw = self.quaternion_to_euler(*self.current_orientation)
             roll_rate = self.current_angular_vel[0]
             pitch_rate = self.current_angular_vel[1]
             
-            # Normalize height (0.0 = fallen, 1.0 = standing)
-            height_normalized = (self.current_estimated_height - 0.2) / 0.6
-            height_normalized = max(0.0, min(1.0, height_normalized))
+            # Update position estimate
+            self.estimate_x_position()
             
-            return np.array([
-                pitch, roll, pitch_rate, roll_rate, 
-                height_normalized, self.velocity_z
-            ], dtype=np.float32)
+            # Build observation vector
+            obs = np.concatenate([
+                [pitch, roll, pitch_rate, roll_rate],  # IMU data
+                self.current_joint_positions,  # Joint positions
+                self.current_joint_velocities,  # Joint velocities
+                [self.x_velocity, self.walking_phase]  # Movement and phase
+            ]).astype(np.float32)
+            
+            return obs
     
-    def send_joint_command(self, actions):
+    def send_joint_command(self, positions):
         """Send joint commands to robot"""
         try:
             trajectory_msg = JointTrajectory()
-            trajectory_msg.joint_names = [
-                'left_hip_joint', 'left_knee_joint',
-                'right_hip_joint', 'right_knee_joint'
-            ]
+            trajectory_msg.joint_names = self.joint_names
             
             point = JointTrajectoryPoint()
-            point.positions = [float(actions[0]), float(actions[1]), 
-                              float(actions[2]), float(actions[3])]
-            point.time_from_start = Duration(sec=0, nanosec=100000000)
+            point.positions = [float(p) for p in positions]
+            point.time_from_start = Duration(sec=0, nanosec=100000000)  # 0.1s
             
             trajectory_msg.points.append(point)
             self.joint_pub.publish(trajectory_msg)
         except Exception as e:
             self.get_logger().error(f'Failed to send joint command: {e}')
     
-    def calculate_reward(self, obs):
-        """Enhanced reward calculation including height"""
-        pitch, roll, pitch_rate, roll_rate, height_norm, vel_z = obs
+    def calculate_reward(self, obs, action):
+        """Calculate reward based on multiple factors"""
+        pitch, roll, pitch_rate, roll_rate = obs[0:4]
+        joint_positions = obs[4:10]
+        joint_velocities = obs[10:16]
+        x_velocity, phase = obs[16:18]
         
-        # Base upright reward
-        upright_reward = 1.0 - (abs(pitch) + abs(roll)) / 3.14
+        reward = 0.0
         
-        # Stability penalty
+        # 1. Upright reward (most important)
+        upright_reward = 1.0 - (abs(pitch) + abs(roll)) / math.pi
+        reward += upright_reward * 2.0
+        
+        # 2. Forward movement reward (main goal)
+        forward_reward = max(0, x_velocity)  # Reward positive velocity
+        reward += forward_reward * 5.0
+        
+        # 3. Stability penalty (penalize high angular velocities)
         stability_penalty = -(abs(pitch_rate) + abs(roll_rate)) * 0.1
+        reward += stability_penalty
         
-        # Height reward - heavily reward staying upright
-        height_reward = height_norm * 2.0
+        # 4. Energy efficiency (penalize large actions)
+        energy_penalty = -np.sum(np.abs(action)) * 0.01
+        reward += energy_penalty
         
-        # Penalize falling velocity
-        fall_velocity_penalty = -abs(vel_z) * 0.5 if vel_z < -0.1 else 0.0
+        # 5. Joint velocity penalty (smoother is better)
+        smoothness_penalty = -np.sum(np.abs(joint_velocities)) * 0.01
+        reward += smoothness_penalty
         
-        # Survival reward
-        survival_reward = 0.1
+        # 6. Symmetric gait reward (legs should move opposite)
+        left_hip, left_knee = joint_positions[0], joint_positions[1]
+        right_hip, right_knee = joint_positions[3], joint_positions[4]
+        symmetry = -abs((left_hip + right_hip)) * 0.1  # Hips should be opposite
+        reward += symmetry
         
-        total_reward = upright_reward + stability_penalty + height_reward + fall_velocity_penalty + survival_reward
+        # 7. Knee bending reward (encourage dynamic walking)
+        knee_bend_reward = (abs(left_knee) + abs(right_knee)) * 0.2
+        reward += knee_bend_reward
+        
+        # 8. Survival bonus
+        reward += 0.1
+        
+        # 9. Curriculum-based reward
+        if self.curriculum_stage == 0:
+            # Stage 0: Just stay upright
+            reward += upright_reward * 3.0
+        elif self.curriculum_stage == 1:
+            # Stage 1: Stay upright and move forward
+            reward += forward_reward * 3.0
+        else:
+            # Stage 2: Optimize gait
+            reward += forward_reward * 5.0
         
         # Heavy penalty for falling
         if self.is_fallen:
-            total_reward -= 10.0
-            
-        return max(total_reward, -10.0)
+            reward -= 20.0
+        
+        return reward
     
     def restart_ros_system(self):
         """Restart the ROS system after a fall"""
@@ -267,39 +322,35 @@ sleep 5
                 result = subprocess.run([self.restart_script_path], 
                                       capture_output=True, text=True, timeout=30)
                 if result.returncode == 0:
-                    self.get_logger().info('ROS system restart completed successfully')
+                    self.get_logger().info('ROS system restart completed')
                 else:
-                    self.get_logger().error(f'Restart script failed: {result.stderr}')
-            except subprocess.TimeoutExpired:
-                self.get_logger().error('Restart script timed out')
+                    self.get_logger().error(f'Restart failed: {result.stderr}')
             except Exception as e:
-                self.get_logger().error(f'Failed to execute restart script: {e}')
+                self.get_logger().error(f'Failed to execute restart: {e}')
         else:
             self.get_logger().error('Restart script not found')
     
     def is_done(self, obs):
-        """Enhanced episode termination logic"""
-        pitch, roll, pitch_rate, roll_rate, height_norm, vel_z = obs
+        """Check if episode should end"""
+        pitch, roll = obs[0], obs[1]
         
         # Manual reset
         if self.key_pressed:
-            self.get_logger().info('Manual reset triggered by ENTER key!')
+            self.get_logger().info('Manual reset triggered!')
             self.key_pressed = False
             return True
         
-        # Fall detection
-        if self.is_fallen:
-            self.get_logger().warn(f'Episode ended due to fall! Height: {self.current_estimated_height:.3f}m')
-            return True
-        
-        # Extreme angle termination (backup)
-        if abs(pitch) > 1.2 or abs(roll) > 1.2:
-            self.get_logger().warn('Episode ended due to extreme angle!')
+        # Fall detection (robot tilted too much)
+        if abs(pitch) > self.fall_angle_threshold or abs(roll) > self.fall_angle_threshold:
+            if not self.is_fallen:
+                self.is_fallen = True
+                self.get_logger().warn(f'Episode {self.episode_number} - Robot fell! Pitch={pitch:.2f}, Roll={roll:.2f}')
             return True
         
         # Max steps
         if self.episode_steps >= self.max_episode_steps:
-            self.get_logger().info('Episode ended - max steps reached')
+            self.get_logger().info(f'Episode {self.episode_number} completed successfully!')
+            self.success_count += 1
             return True
         
         return False
@@ -308,75 +359,133 @@ sleep 5
         """Reset environment for new episode"""
         super().reset(seed=seed)
         
-        # If robot fell, restart ROS system
+        # If robot fell, restart system
         if self.is_fallen:
-            self.get_logger().info('Restarting ROS system due to fall...')
+            self.get_logger().info('Restarting ROS system...')
             self.restart_ros_system()
-            time.sleep(10)  # Wait for system to fully restart
+            time.sleep(3)
+        
+        # Update curriculum if needed
+        if self.episode_number > 0 and self.episode_number % 20 == 0:
+            if self.success_count >= 10 and self.curriculum_stage < 2:
+                self.curriculum_stage += 1
+                self.get_logger().info(f'Advanced to curriculum stage {self.curriculum_stage}')
+                self.success_count = 0
         
         # Reset episode state
+        self.episode_number += 1
         self.episode_steps = 0
         self.is_fallen = False
-        self.fall_warning = False
-        self.current_estimated_height = self.robot_standing_height
-        self.velocity_z = 0.0
+        self.walking_phase = 0.0
+        self.episode_start_time = time.time()
         
-        # Reset robot joints
-        reset_actions = np.array([0.0, 0.0, 0.0, 0.0])
-        self.send_joint_command(reset_actions)
+        # Reset position tracking
+        self.initial_x_position = 0.0
+        self.current_x_position = 0.0
+        self.last_x_position = 0.0
+        self.x_velocity = 0.0
         
-        # Wait for reset and data
+        # Reset to neutral standing pose
+        self.target_joint_positions = np.zeros(6)
+        self.send_joint_command(self.target_joint_positions)
+        
+        # Wait for system to stabilize
         time.sleep(2.0)
         
-        # Get fresh data
-        for _ in range(20):
-            rclpy.spin_once(self, timeout_sec=0.1)
+        # Get fresh sensor data
+        for _ in range(30):
+            rclpy.spin_once(self, timeout_sec=0.05)
         
         obs = self.get_observation()
         info = {
-            'height': self.current_estimated_height,
-            'fall_warning': self.fall_warning
+            'curriculum_stage': self.curriculum_stage,
+            'success_count': self.success_count
         }
         
-        self.get_logger().info(f'Episode reset complete. Height: {self.current_estimated_height:.3f}m')
+        self.get_logger().info(f'Episode {self.episode_number} started (Stage {self.curriculum_stage})')
         return obs, info
     
     def step(self, action):
         """Take one step in environment"""
-        self.send_joint_command(action)
+        # Apply action as delta to target positions
+        self.target_joint_positions += action
+        
+        # Clamp joint positions to safe ranges
+        # Hip: -1.5 to 1.5, Knee: -0.1 to 2.0, Ankle: -0.5 to 0.5
+        joint_limits = np.array([
+            [-1.5, 1.5],  # left hip
+            [-0.1, 2.0],  # left knee
+            [-0.5, 0.5],  # left ankle
+            [-1.5, 1.5],  # right hip
+            [-0.1, 2.0],  # right knee
+            [-0.5, 0.5]   # right ankle
+        ])
+        
+        for i in range(6):
+            self.target_joint_positions[i] = np.clip(
+                self.target_joint_positions[i], 
+                joint_limits[i][0], 
+                joint_limits[i][1]
+            )
+        
+        # Send command
+        self.send_joint_command(self.target_joint_positions)
         time.sleep(0.1)
+        
+        # Update walking phase
+        self.walking_phase = (self.walking_phase + 0.1) % (2 * math.pi)
         
         # Get sensor updates
         for _ in range(3):
-            rclpy.spin_once(self, timeout_sec=0.05)
+            rclpy.spin_once(self, timeout_sec=0.03)
         
         obs = self.get_observation()
-        reward = self.calculate_reward(obs)
+        reward = self.calculate_reward(obs, action)
         done = self.is_done(obs)
         truncated = False
         
         info = {
             'episode_step': self.episode_steps,
-            'pitch': obs[0],
-            'roll': obs[1],
-            'height': self.current_estimated_height,
-            'height_normalized': obs[4],
-            'fall_warning': self.fall_warning,
-            'is_fallen': self.is_fallen
+            'x_position': self.current_x_position,
+            'x_velocity': self.x_velocity,
+            'curriculum_stage': self.curriculum_stage
         }
         
         self.episode_steps += 1
         
-        # Enhanced logging
-        if self.episode_steps % 50 == 0 or done or self.fall_warning:
+        # Logging
+        if self.episode_steps % 100 == 0 or done:
+            elapsed = time.time() - self.episode_start_time
             self.get_logger().info(
-                f'Step {self.episode_steps}: Pitch={obs[0]:.3f}, Roll={obs[1]:.3f}, '
-                f'Height={self.current_estimated_height:.3f}m, Reward={reward:.3f}'
-                f'{" [FALL WARNING]" if self.fall_warning else ""}'
-                f'{" [FALLEN]" if self.is_fallen else ""}'
+                f'Ep {self.episode_number}, Step {self.episode_steps}: '
+                f'X={self.current_x_position:.2f}m, V={self.x_velocity:.3f}m/s, '
+                f'Reward={reward:.2f}, Time={elapsed:.1f}s'
             )
         
         return obs, reward, done, truncated, info
+
+
+class ProgressCallback(BaseCallback):
+    """Custom callback for logging training progress"""
+    
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        self.episode_rewards = []
+        self.episode_lengths = []
+        
+    def _on_step(self):
+        if len(self.model.ep_info_buffer) > 0 and len(self.model.ep_info_buffer) > len(self.episode_rewards):
+            info = self.model.ep_info_buffer[-1]
+            self.episode_rewards.append(info['r'])
+            self.episode_lengths.append(info['l'])
+            
+            if len(self.episode_rewards) % 10 == 0:
+                mean_reward = np.mean(self.episode_rewards[-10:])
+                mean_length = np.mean(self.episode_lengths[-10:])
+                print(f"\n[Callback] Last 10 episodes - Mean reward: {mean_reward:.2f}, Mean length: {mean_length:.1f}")
+        
+        return True
+
 
 def train_bipedal_robot():
     """Main training function"""
@@ -391,41 +500,68 @@ def train_bipedal_robot():
         rclpy.init()
         env = BipedalRLEnv()
         
-        print("Enhanced Bipedal RL Training Started!")
-        print("Features:")
-        print("- Fall detection based on height estimation")
-        print("- Automatic ROS system restart after falls")
-        print("- Press ENTER to manually reset episodes")
-        print("- Ctrl+C to stop training")
-        print(f"- Fall threshold: {env.fall_threshold}m")
-        print(f"- Warning threshold: {env.warning_threshold}m")
+        print("\n" + "="*60)
+        print("Improved Bipedal Walking RL Training")
+        print("="*60)
+        print("\nFeatures:")
+        print("  • Joint state feedback for better control")
+        print("  • Forward movement reward")
+        print("  • Curriculum learning (3 stages)")
+        print("  • Smooth action control (delta positions)")
+        print("  • Energy efficiency optimization")
+        print("  • Symmetric gait encouragement")
+        print("\nControls:")
+        print("  • Press ENTER to manually reset")
+        print("  • Press Ctrl+C to stop training")
+        print("="*60)
         
-        # Wait for data
-        print("\nWaiting for IMU data...")
+        # Wait for sensor data
+        print("\nWaiting for sensor data...")
         start_time = time.time()
-        while not env.data_received and (time.time() - start_time < 30.0):
+        while (not env.imu_received or not env.joint_received) and (time.time() - start_time < 30.0):
             rclpy.spin_once(env, timeout_sec=0.1)
             time.sleep(0.1)
         
-        if not env.data_received:
-            print("ERROR: No IMU data received! Check your robot connection.")
+        if not env.imu_received or not env.joint_received:
+            print("ERROR: Sensor data not received!")
+            print(f"  IMU: {env.imu_received}, Joints: {env.joint_received}")
             return
         
-        print(f"IMU data received! Initial height: {env.current_estimated_height:.3f}m")
+        print("✓ Sensor data received!")
+        print(f"  IMU orientation: {env.current_orientation}")
+        print(f"  Joint positions: {env.current_joint_positions}")
         
-        # Create model with enhanced observation space
-        model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./bipedal_logs/")
+        # Create PPO model with optimized hyperparameters
+        print("\nInitializing PPO model...")
+        model = PPO(
+            "MlpPolicy", 
+            env, 
+            verbose=1,
+            learning_rate=3e-4,
+            n_steps=2048,
+            batch_size=64,
+            n_epochs=10,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            ent_coef=0.01,
+            tensorboard_log="./bipedal_walking_logs/"
+        )
         
-        # Train
-        print("\nStarting training...")
-        model.learn(total_timesteps=20000)
-        model.save("bipedal_model_enhanced")
-        print("Training completed!")
+        # Train with callback
+        print("\nStarting training...\n")
+        callback = ProgressCallback()
+        model.learn(total_timesteps=50000, callback=callback, progress_bar=True)
+        
+        # Save model
+        model_path = "bipedal_walker_improved"
+        model.save(model_path)
+        print(f"\n✓ Training completed! Model saved to {model_path}")
         
     except KeyboardInterrupt:
-        print("\nTraining interrupted")
+        print("\n\nTraining interrupted by user")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"\nError occurred: {e}")
         import traceback
         traceback.print_exc()
     finally:
@@ -434,7 +570,11 @@ def train_bipedal_robot():
                 termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
             except:
                 pass
-        rclpy.shutdown()
+        try:
+            rclpy.shutdown()
+        except:
+            pass
+
 
 if __name__ == '__main__':
     train_bipedal_robot()

@@ -84,6 +84,13 @@
         <springStiffness>0</springStiffness>
         <springReference>0</springReference>
     </gazebo>
+    
+    <!-- ADDED: Gazebo properties for the left ankle joint -->
+    <gazebo reference="left_ankle_joint">
+        <implicitSpringDamper>true</implicitSpringDamper>
+        <springStiffness>0</springStiffness>
+        <springReference>0</springReference>
+    </gazebo>
 
     <gazebo reference="right_hip_joint">
         <implicitSpringDamper>true</implicitSpringDamper>
@@ -92,6 +99,13 @@
     </gazebo>
 
     <gazebo reference="right_knee_joint">
+        <implicitSpringDamper>true</implicitSpringDamper>
+        <springStiffness>0</springStiffness>
+        <springReference>0</springReference>
+    </gazebo>
+
+    <!-- ADDED: Gazebo properties for the right ankle joint -->
+    <gazebo reference="right_ankle_joint">
         <implicitSpringDamper>true</implicitSpringDamper>
         <springStiffness>0</springStiffness>
         <springReference>0</springReference>
